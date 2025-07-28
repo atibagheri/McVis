@@ -9,7 +9,7 @@ from flask import send_from_directory
 import os
 import requests
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "http://localhost:3001"}})
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Register blueprints
 app.register_blueprint(pca_blueprint, url_prefix="/api/pca")
@@ -20,14 +20,14 @@ app.register_blueprint(keggmap_blueprint, url_prefix="/api/keggmap")
 
 
 # Serve static files (barplot images, zip files, etc.)
-@app.route("/downloads/<path:filename>")
+@app.route("/downloads/gomap/<path:filename>")
 def download_gomap_file(filename):
-    output_dir = os.path.join(os.getcwd(), "./degviz_api/gomap_output")  # <-- path to your GOmap output
+    output_dir = os.path.join(os.getcwd(), "./degviz_api/gomap_output")
     return send_from_directory(output_dir, filename, as_attachment=True)
 
-@app.route("/downloads/<path:filename>")
-def download_file(filename):
-    output_dir = os.path.join(os.getcwd(), "./degviz_api/Keggmap_output")  # adjust if different
+@app.route("/downloads/kegg/<path:filename>")
+def download_kegg_file(filename):
+    output_dir = os.path.join(os.getcwd(), "./degviz_api/Keggmap_output")
     return send_from_directory(output_dir, filename, as_attachment=True)
 
 @app.after_request
