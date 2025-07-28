@@ -1,0 +1,1 @@
+sample	Day	ConditionT1	1	ControlT2	2	ControlT3	3	ControlT4	4	ControlT5	5	ControlT6	6	ControlT7	7	ControlT8	8	TreatedT9	9	TreatedT10	10	TreatedT11	11	TreatedT12	12	TreatedT13	13	TreatedT14	14	TreatedT15	15	TreatedT16	16	Treated
