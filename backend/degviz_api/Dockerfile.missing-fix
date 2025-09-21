@@ -1,0 +1,36 @@
+
+# Bioconductor 3.19 (R 4.4) – install only the stubborn deps
+FROM bioconductor/bioconductor_docker:RELEASE_3_19
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+ENV CRAN=https://cloud.r-project.org
+
+# handy system libs (safe if already present)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libcurl4-openssl-dev libxml2-dev \
+    libpng-dev libjpeg-dev libtiff5-dev \
+    libfreetype6-dev libfontconfig1-dev \
+    libharfbuzz-dev libfribidi-dev \
+    curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install the missing chain in order and fail fast if anything can’t load
+RUN R -q -e "options(repos = c(CRAN = Sys.getenv('CRAN')), \
+               Ncpus = max(1L, parallel::detectCores()-1L)); \
+             if (!'BiocManager' %in% rownames(installed.packages())) \
+               install.packages('BiocManager', repos=Sys.getenv('CRAN')); \
+             ## 1) fgsea (CRAN) first (needed by DOSE)
+             install.packages('fgsea'); \
+             ## 2) Bioconductor bits in dependency order
+             BiocManager::install(c('treeio','tidytree','ggtree'), ask=FALSE, update=TRUE, dependencies=TRUE); \
+             BiocManager::install('DOSE',          ask=FALSE, update=TRUE, dependencies=TRUE); \
+             BiocManager::install('enrichplot',    ask=FALSE, update=TRUE, dependencies=TRUE); \
+             BiocManager::install('clusterProfiler', ask=FALSE, update=TRUE, dependencies=TRUE); \
+             ## 3) verification (fail the build if any are missing)
+             req <- c('fgsea','treeio','tidytree','ggtree','DOSE','enrichplot','clusterProfiler'); \
+             miss <- req[!vapply(req, requireNamespace, logical(1), quietly=TRUE)]; \
+             if (length(miss)) stop('Missing packages: ', paste(miss, collapse=', ')); \
+             invisible(lapply(req, function(p) library(p, character.only=TRUE))); \
+             cat('✅ Installed & loadable:\\n'); \
+             cat(paste(req, sapply(req, function(p) as.character(packageVersion(p))), collapse=' | '), '\\n')"

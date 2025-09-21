@@ -1,0 +1,6 @@
+user_uploads/
+results/
+node_modules/
+*.RData
+*.Rhistory
+.env

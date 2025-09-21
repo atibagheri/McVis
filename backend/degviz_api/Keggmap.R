@@ -1,315 +1,243 @@
+suppressPackageStartupMessages({
+  library(clusterProfiler)
+  library(org.Mm.eg.db)
+  library(org.Hs.eg.db)
+  library(pathview)
+  library(ggplot2)
+  library(readr)
+  library(dplyr)
+  library(zip)
+  library(base64enc)
+})
 
-library(clusterProfiler)
-library(org.Mm.eg.db)
-library(org.Hs.eg.db)
-library(pathview)
-library(ggplot2)
-library(openxlsx)
-library(readr)
-library(dplyr)
-library(zip)
-library(base64enc)
-
-# Helper: pick OrgDb and organism code
+# ---- helpers
 get_org <- function(species) {
-  if (species == "mouse") {
+  if (identical(species, "mouse")) {
     list(orgdb = org.Mm.eg.db, kegg = "mmu")
-  } else if (species == "human") {
+  } else if (identical(species, "human")) {
     list(orgdb = org.Hs.eg.db, kegg = "hsa")
   } else {
-    stop("Unsupported species: must be 'mouse' or 'human'")
+    stop("Unsupported species: 'mouse' or 'human'")
   }
 }
+b64 <- function(path) base64enc::base64encode(readBin(path, "raw", n = file.info(path)$size))
 
-# ===============================================================
-# Function: Run KEGG from gene list only (highlight only)
-# ===============================================================
-run_kegg_from_gene_list <- function(input_file, species) {
-  output_dir <- "Keggmap_output"
-  if (!dir.exists(output_dir)) {
-    dir.create(output_dir, recursive = TRUE)
+flat_zip <- function(zip_path, files, root) {
+  files <- files[file.exists(files)]
+  if (!length(files)) { file.create(zip_path); return(zip_path) }
+  if ("root" %in% names(formals(zip::zipr))) {
+    invisible(zip::zipr(zipfile = zip_path, files = basename(files), root = root))
+  } else {
+    old <- setwd(root); on.exit(setwd(old), add = TRUE)
+    invisible(zip::zip(zipfile = zip_path, files = basename(files)))
   }
+  zip_path
+}
 
-  org <- get_org(species)
+# simple patterns
+is_base <- function(x, k) {
+  # base maps from pathview-native or our _BASE suffix
+  grepl(paste0("^", k, "\\d+.*gene.*\\.png$"), basename(x), ignore.case=TRUE) |
+    grepl("_BASE.*\\.png$", basename(x), ignore.case=TRUE) |
+    grepl("\\.pathview\\.png$", basename(x), ignore.case=TRUE)
+}
+is_fc <- function(x) {
+  grepl("_FC.*\\.png$", basename(x), ignore.case=TRUE) |
+    grepl("foldchange.*\\.png$", basename(x), ignore.case=TRUE)
+}
 
-  # read gene symbols
-  gene_symbols <- read_lines(input_file) %>% unique() %>% na.omit()
-  gene_df <- bitr(
-    gene_symbols,
-    fromType = "SYMBOL",
-    toType = "ENTREZID",
-    OrgDb = org$orgdb
-  )
+# =========================================================
+# MODE 1: Gene list only (base highlight maps)
+# =========================================================
+run_kegg_from_gene_list <- function(input_file, species) {
+  org  <- get_org(species)
 
-  # write unmapped
+  # work in a temp sandbox; delete when done
+  tdir <- tempfile("kegg_"); dir.create(tdir)
+  on.exit(unlink(tdir, recursive = TRUE, force = TRUE), add = TRUE)
+  oldwd <- setwd(tdir); on.exit(setwd(oldwd), add = TRUE)
+
+  # read / map
+  gene_symbols <- read_lines(input_file) |> unique()
+  gene_symbols <- gene_symbols[!is.na(gene_symbols) & nzchar(gene_symbols)]
+  if (!length(gene_symbols)) stop("Input file has no gene symbols.")
+
+  gene_df  <- bitr(gene_symbols, fromType="SYMBOL", toType="ENTREZID", OrgDb=org$orgdb)
   unmapped <- setdiff(gene_symbols, gene_df$SYMBOL)
-  writeLines(unmapped, file.path(output_dir, "unmapped_genes.txt"))
+  writeLines(unmapped, file.path(tdir, "unmapped_genes.txt"))
 
-  # run enrichment
-  kegg_enrich <- enrichKEGG(
-    gene = gene_df$ENTREZID,
-    organism = org$kegg,
-    pvalueCutoff = 0.05
-  )
-
-  enrich_df <- as.data.frame(kegg_enrich@result)
-  write.csv(enrich_df,
-            file = file.path(output_dir, "full_KEGG_enrichment_results.csv"),
-            row.names = FALSE)
+  ek <- tryCatch(enrichKEGG(gene = gene_df$ENTREZID, organism = org$kegg, pvalueCutoff = 0.05),
+                 error = function(e) NULL)
+  enr_df <- if (!is.null(ek)) as.data.frame(ek@result) else data.frame()
+  full_csv <- file.path(tdir, "full_KEGG_enrichment_results.csv")
+  write.csv(enr_df, full_csv, row.names = FALSE)
 
   barplot_path <- NULL
-  top10_csv <- NULL
-  map_files <- character(0)
-  map_files_base64 <- list()
+  top_csv      <- NULL
 
-  if (nrow(enrich_df) > 0) {
-    # create top10
-    top10 <- enrich_df %>% arrange(p.adjust) %>% head(10)
-    top10_csv <- file.path(output_dir, "top10_KEGG_enrichment.csv")
-    write.csv(top10, top10_csv, row.names = FALSE)
+  if (nrow(enr_df) > 0) {
+    top10 <- enr_df |> arrange(p.adjust) |> head(10)
+    top_csv <- file.path(tdir, "top10_KEGG_enrichment.csv")
+    write.csv(top10, top_csv, row.names = FALSE)
 
-    # barplot
     top10$Description <- factor(top10$Description, levels = rev(top10$Description))
-    barplot <- ggplot(top10, aes(x = Count, y = Description, fill = p.adjust)) +
+    p <- ggplot(top10, aes(x = Count, y = Description, fill = p.adjust)) +
       geom_bar(stat = "identity") +
       scale_fill_gradient(low = "#d73027", high = "#4575b4", name = "p.adjust") +
       labs(title = "Top 10 KEGG Pathways", x = "Gene Count", y = NULL) +
-      theme_minimal(base_size = 14) +
-      theme(
-        plot.title = element_text(face = "bold", hjust = 0.5),
-        axis.text.y = element_text(size = 12)
-      )
-    barplot_path <- file.path(output_dir, "KEGG_Top10_Barplot.png")
-    ggsave(filename = barplot_path, plot = barplot, width = 10, height = 6)
+      theme_classic(base_size = 14) +
+      theme(plot.title = element_text(face = "bold", hjust = 0.5),
+            axis.text.y = element_text(size = 12))
+    barplot_path <- file.path(tdir, "KEGG_Top10_Barplot.png")
+    ggsave(barplot_path, p, width = 10, height = 6, dpi = 300, bg="white")
 
-    # prepare highlight-only gene data
-    highlight_data <- setNames(rep(1, length(gene_df$ENTREZID)), gene_df$ENTREZID)
-
-    # generate pathway maps
-    for (i in seq_len(nrow(top10))) {
-      pid <- top10$ID[i]
-      tryCatch({
-        pathview(
-          gene.data = highlight_data,
-          pathway.id = gsub(org$kegg, "", pid),
-          species = org$kegg,
-          # out.suffix = paste0("KEGG_", desc),
-          kegg.native = TRUE,
-          same.layer = TRUE,
-          gene.idtype = "entrez",
-          limit = list(gene = 1, cpd = 1),
-          low = list(gene = NA),
-          mid = list(gene = NA),
-          high = list(gene = NA),
-          kegg.dir = output_dir
-        )
-      }, error = function(e) {
-        message("Map error: ", e$message)
-      })
-    }
-
-
-# collect only clean KEGG maps (explicitly exclude foldchange in case)
-all_pngs <- list.files(output_dir, pattern = "\\.png$", full.names = TRUE)
-map_files <- all_pngs[
-  grepl(paste0("^", org$kegg, "[0-9]+.*\\.png$"), basename(all_pngs)) &
-  !grepl("foldchange", basename(all_pngs), ignore.case = TRUE)
-]
-
-# convert each map to base64
-map_files_base64 <- list()
-if (length(map_files) > 0) {
-  for (f in map_files) {
-    if (file.exists(f)) {
-      img_bytes <- readBin(f, what = "raw", n = file.info(f)$size)
-      map_files_base64[[basename(f)]] <- base64encode(img_bytes)
+    # highlight-only maps
+    highlight <- setNames(rep(1, length(gene_df$ENTREZID)), gene_df$ENTREZID)
+    for (pid in gsub(org$kegg, "", top10$ID)) {
+      try(pathview(gene.data  = highlight,
+                   pathway.id = pid,
+                   species    = org$kegg,
+                   kegg.native= TRUE,
+                   same.layer = TRUE,
+                   gene.idtype= "entrez",
+                   limit      = list(gene = 1, cpd = 1),
+                   low  = list(gene = NA),
+                   mid  = list(gene = NA),
+                   high = list(gene = NA),
+                   kegg.dir   = tdir), silent = TRUE)
     }
   }
+
+  # collect maps
+  all_png <- list.files(tdir, pattern="\\.png$", full.names = TRUE)
+  base_maps <- all_png[ is_base(all_png, org$kegg) & !is_fc(all_png) ]
+
+  # zip
+  zip_path <- file.path(tdir, "kegg_results.zip")
+  files_to_zip <- c(full_csv, if (length(top_csv)) top_csv,
+                    file.path(tdir, "unmapped_genes.txt"),
+                    if (length(barplot_path)) barplot_path,
+                    base_maps)
+  flat_zip(zip_path, files_to_zip, root = tdir)
+
+  list(
+    success             = TRUE,
+    mode                = "genelist",
+    species             = species,
+    barplot_base64      = if (length(barplot_path)) b64(barplot_path) else NULL,
+    maps                = setNames(lapply(base_maps, b64), basename(base_maps)),
+    foldchange_maps     = list(),
+    zip_base64          = b64(zip_path),
+    zip_filename        = "kegg_genelist_results.zip"
+  )
 }
 
-  }
-
-  # barplot base64
-  barplot_base64 <- NULL
-  if (!is.null(barplot_path) && file.exists(barplot_path)) {
-    img_bytes <- readBin(barplot_path, what = "raw", n = file.info(barplot_path)$size)
-    barplot_base64 <- base64encode(img_bytes)
-  }
-
-  # zip everything
-  zip_file <- file.path(output_dir, "kegg_results.zip")
-  if (file.exists(zip_file)) file.remove(zip_file)
-  zip::zip(zipfile = zip_file, files = list.files(output_dir, full.names = TRUE))
-
-  return(list(
-    barplot_base64 = barplot_base64,
-    top10_csv = top10_csv,
-    full_csv = file.path(output_dir, "full_KEGG_enrichment_results.csv"),
-    unmapped = file.path(output_dir, "unmapped_genes.txt"),
-    maps = map_files_base64,
-    foldchange_maps = character(0),
-    zip_file = zip_file,
-    output_dir = output_dir
-  ))
-}
-
-# ===============================================================
-# Function 2: Run KEGG from gene list + fold change
-# ===============================================================
+# =========================================================
+# MODE 2: Gene list + log2FC (base + FC maps)
+# =========================================================
 run_kegg_from_gene_list_fc <- function(input_file, species) {
-  output_dir <- file.path(getwd(), "Keggmap_output")
-  if (!dir.exists(output_dir)) {
-    dir.create(output_dir, recursive = TRUE)
+  org  <- get_org(species)
+
+  # always temp; clean afterwards
+  tdir <- tempfile("kegg_"); dir.create(tdir)
+  on.exit(unlink(tdir, recursive = TRUE, force = TRUE), add = TRUE)
+  oldwd <- setwd(tdir); on.exit(setwd(oldwd), add = TRUE)
+
+  deg <- read.table(input_file, header=TRUE, sep="\t", stringsAsFactors=FALSE, check.names = FALSE)
+  if (!all(c("Gene.ID","log2FC") %in% names(deg))) {
+    stop("Input TXT must have columns: Gene.ID and log2FC")
+  }
+  deg <- deg |> distinct() |> na.omit()
+
+  m  <- bitr(deg$Gene.ID, fromType="SYMBOL", toType="ENTREZID", OrgDb=org$orgdb)
+  unmapped <- setdiff(deg$Gene.ID, m$SYMBOL)
+  writeLines(unmapped, file.path(tdir,"unmapped_genes.txt"))
+  mm <- merge(m, deg, by.x="SYMBOL", by.y="Gene.ID")
+  if (!nrow(mm)) stop("No genes could be mapped to ENTREZ IDs.")
+
+  ek <- tryCatch(enrichKEGG(gene = mm$ENTREZID, organism = org$kegg, pvalueCutoff = 0.05),
+                 error = function(e) NULL)
+  enr_df <- if (!is.null(ek)) as.data.frame(ek@result) else data.frame()
+  full_csv <- file.path(tdir, "full_KEGG_enrichment_results.csv")
+  write.csv(enr_df, full_csv, row.names = FALSE)
+
+  barplot_path <- NULL
+  top_csv      <- NULL
+
+  if (nrow(enr_df) > 0) {
+    top10 <- enr_df |> arrange(p.adjust) |> head(10)
+    top_csv <- file.path(tdir, "top10_KEGG_enrichment.csv")
+    write.csv(top10, top_csv, row.names = FALSE)
+
+    top10$Description <- factor(top10$Description, levels = rev(top10$Description))
+    p <- ggplot(top10, aes(x = Count, y = Description, fill = p.adjust)) +
+      geom_bar(stat = "identity") +
+      scale_fill_gradient(low = "#d73027", high = "#4575b4", name = "p.adjust") +
+      labs(title = "Top 10 KEGG Pathways", x = "Gene Count", y = NULL) +
+      theme_classic(base_size = 14) +
+      theme(plot.title = element_text(face = "bold", hjust = 0.5),
+            axis.text.y = element_text(size = 12))
+    barplot_path <- file.path(tdir, "KEGG_Top10_Barplot.png")
+    ggsave(barplot_path, p, width = 10, height = 6, dpi = 300, bg="white")
+
+    # vectors for maps
+    highlight <- setNames(rep(1, length(mm$ENTREZID)), mm$ENTREZID)
+    gene_fc   <- setNames(as.numeric(mm$log2FC), mm$ENTREZID)
+    gene_fc   <- gene_fc[is.finite(gene_fc)]
+
+    for (i in seq_len(nrow(top10))) {
+      pid  <- gsub(org$kegg, "", top10$ID[i])
+      desc <- as.character(top10$Description[i])
+      safe <- gsub("[^A-Za-z0-9_\\-]", "_", desc)
+
+      # base highlight map
+      try(pathview(gene.data  = highlight,
+                   pathway.id = pid,
+                   species    = org$kegg,
+                   out.suffix = paste0(safe, "_BASE"),
+                   kegg.native= TRUE,
+                   same.layer = TRUE,
+                   gene.idtype= "entrez",
+                   limit      = list(gene = 1, cpd = 1),
+                   low  = list(gene = NA),
+                   mid  = list(gene = NA),
+                   high = list(gene = NA),
+                   kegg.dir   = tdir), silent = TRUE)
+
+      # fold change colored map
+      try(pathview(gene.data  = gene_fc,
+                   pathway.id = pid,
+                   species    = org$kegg,
+                   out.suffix = paste0(safe, "_FC"),
+                   kegg.native= TRUE,
+                   same.layer = TRUE,
+                   gene.idtype= "entrez",
+                   kegg.dir   = tdir), silent = TRUE)
     }
+  }
 
-    org <- get_org(species)
+  # collect maps
+  all_png <- list.files(tdir, pattern="\\.png$", full.names = TRUE)
+  base_maps <- all_png[ is_base(all_png, org$kegg) & !is_fc(all_png) ]
+  fc_maps   <- all_png[ is_fc(all_png) ]
 
-  # 📥 Read a tab‑delimited TXT with columns: Gene.ID and log2FC
-    deg_data <- read.table(input_file, header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+  # zip
+  zip_path <- file.path(tdir, "kegg_results.zip")
+  files_to_zip <- c(full_csv,
+                    if (length(top_csv)) top_csv,
+                    file.path(tdir,"unmapped_genes.txt"),
+                    if (length(barplot_path)) barplot_path,
+                    base_maps, fc_maps)
+  flat_zip(zip_path, files_to_zip, root = tdir)
 
-    # 🧹 Clean up the data
-    if (!all(c("Gene.ID", "log2FC") %in% colnames(deg_data))) {
-      stop("Input TXT must have columns: Gene.ID and log2FC")
-    }
-    deg_data <- deg_data %>% na.omit() %>% unique()
-    # 🔎 Map SYMBOL → ENTREZ
-    gene_df <- bitr(deg_data$Gene.ID,
-                    fromType = "SYMBOL",
-                    toType = "ENTREZID",
-                    OrgDb = org$orgdb)
-
-    unmapped_genes <- setdiff(deg_data$Gene.ID, gene_df$SYMBOL)
-    writeLines(unmapped_genes, file.path(output_dir, "unmapped_genes.txt"))
-
-    # 🔀 Merge fold-change data with mapped IDs
-    deg_merged <- merge(gene_df, deg_data, by.x = "SYMBOL", by.y = "Gene.ID")
-
-
-    kegg_enrich <- enrichKEGG(gene = deg_merged$ENTREZID, organism = org$kegg, pvalueCutoff = 0.05)
-
-    barplot_path <- NULL
-    top10_csv <- NULL
-    map_files <- character(0)
-    fc_map_files <- character(0)
-
-    if (!is.null(kegg_enrich@result) && nrow(kegg_enrich@result) > 0) {
-      write.csv(as.data.frame(kegg_enrich@result),
-                file = file.path(output_dir, "full_KEGG_enrichment_results.csv"),
-                row.names = FALSE)
-
-      kegg_top10 <- head(kegg_enrich@result[order(kegg_enrich@result$p.adjust), ], 10)
-      top10_csv <- file.path(output_dir, "top10_KEGG_enrichment.csv")
-      write.csv(kegg_top10, top10_csv, row.names = FALSE)
-
-      kegg_top10$Description <- factor(kegg_top10$Description, levels = rev(kegg_top10$Description))
-      barplot_path <- file.path(output_dir, "KEGG_Top10_Barplot.png")
-      cat("barplot_path: ", barplot_path, "\n")
-      png(filename = barplot_path, width = 1200, height = 800, res = 150)
-
-      print(
-        ggplot(kegg_top10, aes(x = Description, y = -log10(p.adjust))) +
-          geom_bar(stat = "identity", fill = "#1F77B4") +
-          coord_flip() +
-          labs(title = "Top 10 Enriched KEGG Pathways",
-              x = "Pathway",
-              y = expression(-log[10]~"(adjusted p-value)")) +
-          theme_minimal(base_size = 14)
-      )
-      dev.off()
-
-      # After saving the plot, read the image as raw bytes and return as base64 string
-      img_bytes <- readBin(barplot_path, what = "raw", n = file.info(barplot_path)$size)
-      barplot_base64 <- base64enc::base64encode(img_bytes)
-
-
-      gene_fc <- setNames(as.numeric(deg_merged$log2FC), deg_merged$ENTREZID)
-      gene_fc <- gene_fc[!is.na(gene_fc) & is.finite(gene_fc)]
-    
-      # Save current working directory
-      old_wd <- getwd()
-
-      # Change working directory to your output folder
-      setwd(output_dir)
-      for (i in seq_len(nrow(kegg_top10))) {
-        pid <- kegg_top10$ID[i]
-        desc <- kegg_top10$Description[i]
-
-        # Sanitize and append "_FC"
-        safe_name <- gsub("[^A-Za-z0-9_\\-]", "_", desc)
-        message("🔧 Generating map for: ", pid, " with suffix: ", safe_name)
-
-        tryCatch({
-          pathview(
-            gene.data = gene_fc,
-            pathway.id = pid,
-            species = org$kegg,
-            out.suffix = safe_name,
-            gene.idtype = "entrez",
-            limit = list(gene = 3),
-            kegg.dir = output_dir,
-          )
-        }, error = function(e) {
-          message("Map error: ", e$message, "\n")
-        })
-      }
-
-
-
-      setwd(old_wd)
-
-      # collect maps
-      all_maps <- list.files(output_dir, pattern = "\\.png$", full.names = TRUE)
-      map_files <- all_maps[grepl(paste0("^", org$kegg, "[0-9]+.*\\.png$"), basename(all_maps))]
-      
-      cat("==============================================\n")
-      cat("all_maps: ", all_maps, "\n")
-      cat("map_files: ", map_files, "\n")
-      cat("==============================================\n")
-      fc_map_files <- all_maps[grepl("foldchange", all_maps, ignore.case = TRUE)]
-      # Convert map_files (list of PNGs) to base64
-      map_files_base64 <- list()
-      if (length(map_files) > 0) {
-        for (f in map_files) {
-          if (file.exists(f)) {
-            img_bytes <- readBin(f, what = "raw", n = file.info(f)$size)
-            img_base64 <- base64enc::base64encode(img_bytes)
-            map_files_base64[[f]] <- img_base64
-          } else {
-            map_files_base64[[f]] <- NULL
-            message("File does not exist: ", f)
-          }
-        }
-      }
-
-      # Convert fc_map_files (list of PNGs) to base64
-      fc_map_files_base64 <- list()
-      if (length(fc_map_files) > 0) {
-        for (f in fc_map_files) {
-          if (file.exists(f)) {
-            img_bytes <- readBin(f, what = "raw", n = file.info(f)$size)
-            img_base64 <- base64enc::base64encode(img_bytes)
-            fc_map_files_base64[[f]] <- img_base64
-          } else {
-            fc_map_files_base64[[f]] <- NULL
-            message("File does not exist: ", f)
-          }
-        }
-      }
-    }
-
-    # zip
-    zip_file <- file.path(output_dir, "kegg_results.zip")
-    if (file.exists(zip_file)) file.remove(zip_file)
-    zip::zip(zipfile = zip_file, files = list.files(output_dir, full.names = TRUE))
-
-    return(list(
-      barplot_base64 = barplot_base64,
-      top10_csv = top10_csv,
-      full_csv = file.path(output_dir, "full_KEGG_enrichment_results.csv"),
-      unmapped = file.path(output_dir, "unmapped_genes.txt"),
-      maps = map_files_base64,
-      foldchange_maps = fc_map_files_base64,
-      zip_file = zip_file,
-      output_dir = output_dir
-    ))
+  list(
+    success             = TRUE,
+    mode                = "genelist_fc",
+    species             = species,
+    barplot_base64      = if (length(barplot_path)) b64(barplot_path) else NULL,
+    maps                = setNames(lapply(base_maps, b64), basename(base_maps)),
+    foldchange_maps     = setNames(lapply(fc_maps,   b64), basename(fc_maps)),
+    zip_base64          = b64(zip_path),
+    zip_filename        = "kegg_genelist_fc_results.zip"
+  )
 }

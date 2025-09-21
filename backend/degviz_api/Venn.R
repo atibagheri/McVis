@@ -25,7 +25,7 @@ generate_venn_or_upset <- function(paths, output_png = "venn_output.png", output
     unique(df$Gene.ID)
   })
   
-  names(datasets) <- paste0("Set", seq_along(datasets))
+  names(datasets) <- basename(tools::file_path_sans_ext(files))
   num_sets <- length(datasets)
   cat("✅ Number of sets:", num_sets, "\n")
   
@@ -40,7 +40,11 @@ generate_venn_or_upset <- function(paths, output_png = "venn_output.png", output
         category = names(datasets),
         fill = c("#56B4E9", "#E69F00"),
         cat.col = c("#56B4E9", "#E69F00"),
-        cat.cex = 1.5, cex = 1.5, lty = "solid", scaled = FALSE
+        cat.cex = 3, cex = 3, lty = "solid", scaled = FALSE,  
+        cat.pos  = c(0, 0),        # 270° = left, 90° = right
+        cat.dist = c(0.015, 0.015),     # push outward a bit
+        cat.just = list(c(0.5,0),    # left label right-justified
+                  c(0.5, 0))
       )
     } else if (num_sets == 3) {
       a1 <- length(datasets[[1]])
@@ -60,24 +64,34 @@ generate_venn_or_upset <- function(paths, output_png = "venn_output.png", output
         category = names(datasets),
         fill = c("#56B4E9", "#E69F00", "#F0E442"),
         cat.col = c("#56B4E9", "#E69F00", "#F0E442"),
-        cat.cex = 1.5, cex = 1.5, lty = "solid", 
-        scaled = FALSE
+        cat.cex = 3, cex = 3, lty = "solid", 
+        scaled = FALSE,
+        cat.pos = c(-20, 20, 180),   # tweak until you like
+        cat.dist = c(0.1, 0.1, 0.1)
       )
     } else if (num_sets == 4 || num_sets == 5) {
       fill_colors <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2")[1:num_sets]
+      # Generate in-memory Venn object, no log file
       venn.plot <- venn.diagram(
         x = datasets,
         category.names = names(datasets),
-        filename = NULL,
+        filename = NULL,     # don't create a file
+        output = FALSE,      # suppress internal writing
         col = "blue",
+        disable.logging = TRUE,
         fill = fill_colors,
         alpha = 0.5,
-        cex = 1.5,
-        cat.cex = 1.5,
-        cat.dist = 0.05,
-        scaled = FALSE
+        cex = 3,
+        cat.cex = 2,
+        cat.dist = 0.09,
+        scaled = FALSE,
+        main = NULL,
+        print.mode = "raw"
       )
+      # Render directly to the PNG/PDF device
+      grid.newpage()
       grid.draw(venn.plot)
+     
     } else if (num_sets >= 6) {
       df_list <- lapply(names(datasets), function(name) {
         data.frame(Gene.ID = datasets[[name]], Set = name)
@@ -99,7 +113,7 @@ generate_venn_or_upset <- function(paths, output_png = "venn_output.png", output
   dev.off()
   
   # ✅ Save to PDF
-  pdf(output_pdf, width = 8, height = 8)
+  pdf(output_pdf, width = 12, height = 8)
   plot_logic()
   dev.off()
   

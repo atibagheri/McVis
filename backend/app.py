@@ -1,35 +1,41 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify
 from flask_cors import CORS
+import os
+
+# blueprints
+from routes.transpca import transpca_blueprint
 from routes.pca import pca_blueprint
 from routes.venn_upset import venn_upset_blueprint
-from routes.enrichment import enrichment_blueprint
 from routes.gomap import gomap_blueprint
 from routes.keggmap import keggmap_blueprint
-from flask import send_from_directory
-import os
-import requests
+from routes.textmining import textmining_blueprint
+from routes.circos import circos_blueprint
+
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Register blueprints
+app.config.update(
+    R_SERVICE_URL=os.getenv("R_SERVICE_URL", "http://127.0.0.1:8000"),
+    MOUSE_TPM_PATH=os.getenv(
+        "MOUSE_TPM_PATH",
+        "/Users/student/Desktop/AppDEG/backend/degviz_api/data/MedianNorm_TPMs_order_Mouse.txt"
+    ),
+)
+
+# --- register blueprints (NO extra indentation) ---
+app.register_blueprint(transpca_blueprint, url_prefix="/api/transpca")
 app.register_blueprint(pca_blueprint, url_prefix="/api/pca")
 app.register_blueprint(venn_upset_blueprint, url_prefix="/api/venn-upset")
-app.register_blueprint(enrichment_blueprint, url_prefix="/api/enrichment")
 app.register_blueprint(gomap_blueprint, url_prefix="/api/gomap")
 app.register_blueprint(keggmap_blueprint, url_prefix="/api/keggmap")
+app.register_blueprint(textmining_blueprint, url_prefix="/api/textmining")
+app.register_blueprint(circos_blueprint, url_prefix="/api/circos")
 
+@app.route("/healthz")
+def healthz():
+    return jsonify({"status": "ok"}), 200
 
-# Serve static files (barplot images, zip files, etc.)
-@app.route("/downloads/gomap/<path:filename>")
-def download_gomap_file(filename):
-    output_dir = os.path.join(os.getcwd(), "./degviz_api/gomap_output")
-    return send_from_directory(output_dir, filename, as_attachment=True)
-
-@app.route("/downloads/kegg/<path:filename>")
-def download_kegg_file(filename):
-    output_dir = os.path.join(os.getcwd(), "./degviz_api/Keggmap_output")
-    return send_from_directory(output_dir, filename, as_attachment=True)
-
+# optional: extra CORS headers (CORS() already handles most cases)
 @app.after_request
 def apply_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -38,4 +44,4 @@ def apply_cors_headers(response):
     return response
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5050, debug=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("FLASK_PORT", 5050)), debug=True)

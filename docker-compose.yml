@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  rapi:
+    image: atefehb22/mcvis-rapi:latest     
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL","curl -fsS http://127.0.0.1:8000/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - shared:/shared             # ✅ shared path visible to R
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: atefehb22/mcvis-backend:latest   # add image tag so you can push
+    environment:
+      R_SERVICE_URL: "http://rapi:8000"   # ✅ talk to R by service name
+      R_API_BASE:    "http://rapi:8000"   # (set both, some code may read either)
+      SHARED_DIR:    "/shared"            # ✅ where to save uploads
+      FLASK_ENV:     "production"
+    depends_on:
+      rapi:
+        condition: service_healthy
+    ports:
+      - "5050:5050"
+    volumes:
+      - shared:/shared             # ✅ same shared path mounted in backend
+      - ./backend/uploads:/app/uploads
+      - ./backend/results:/app/results
+
+  web:
+    build:
+      context: ./degviz
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_API_BASE: "/api"
+        PUBLIC_URL: "/AppDEG"
+    image: atefehb22/mcvis-web:latest      
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+
+volumes:
+  shared:                            # ✅ declare the volume

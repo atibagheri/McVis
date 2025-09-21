@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: degvis-app
-    env: docker
-    plan: free
-    repo: https://github.com/atibagheri/AppDEG
-    branch: main
-    healthCheckPath: /
-    autoDeploy: true

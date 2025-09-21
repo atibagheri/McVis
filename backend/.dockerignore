@@ -1,0 +1,15 @@
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Runtime artifacts
+uploads/
+results/
+
+# macOS
+.DS_Store
+

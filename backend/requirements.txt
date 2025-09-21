@@ -5,3 +5,10 @@ scikit-learn
 matplotlib
 seaborn
 numpy
+biopython
+wordcloud
+pillow
+lxml
+requests
+plotly
+kaleido
